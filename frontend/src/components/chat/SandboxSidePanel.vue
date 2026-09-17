@@ -73,9 +73,20 @@
           <t-skeleton animation="gradient" :row-col="[{ width: '100%', height: '100%', type: 'rect' }]" />
         </div>
 
-        <div v-if="panel?.activeTab.value === 'desktop'" class="chat-sandbox-panel__placeholder">
-          <t-icon name="desktop" size="28px" />
-          <p>{{ t('chat.sandbox.desktopPlaceholder') }}</p>
+        <!-- 桌面：与终端同样的惰性挂载 + v-show 保活。桌面的重连代价比终端高得多
+             （要重跑一遍 3–8 秒的懒启动），切 tab 断开是不可接受的。 -->
+        <SandboxDesktop
+          v-if="desktopMounted && desktopTabVisible"
+          v-show="panel?.activeTab.value === 'desktop'"
+          :key="sessionId"
+          ref="desktopRef"
+          :session-id="sessionId"
+          :agent-id="agentId"
+          :agent-source-tenant-id="agentSourceTenantId"
+          class="chat-sandbox-panel__desktop"
+        />
+        <div v-else-if="panel?.activeTab.value === 'desktop' && desktopTabVisible" class="chat-sandbox-panel__placeholder">
+          <t-skeleton animation="gradient" :row-col="[{ width: '100%', height: '100%', type: 'rect' }]" />
         </div>
       </div>
     </aside>
@@ -92,7 +103,9 @@ import {
   type SandboxPanelTab,
 } from '@/composables/useChatSandboxPanel'
 import SandboxTerminal from '@/views/chat/components/SandboxTerminal.vue'
+import SandboxDesktop from '@/views/chat/components/SandboxDesktop.vue'
 import ChatArtifactsPanel from '@/views/chat/components/ChatArtifactsPanel.vue'
+import { useChatResourcesStore } from '@/stores/chatResources'
 import type { SessionArtifactItem } from '@/utils/sessionArtifacts'
 
 const props = withDefaults(
@@ -115,28 +128,89 @@ const props = withDefaults(
 
 const { t } = useI18n()
 const panel = useChatSandboxPanel()
+const chatResources = useChatResourcesStore()
+const sandboxConfigsReady = ref(false)
 
-const tabs = computed(() => [
-  { id: 'artifacts' as SandboxPanelTab, icon: 'folder', label: t('chat.sandbox.tabArtifacts') },
-  { id: 'terminal' as SandboxPanelTab, icon: 'terminal', label: t('chat.sandbox.tabTerminal') },
-  { id: 'desktop' as SandboxPanelTab, icon: 'desktop', label: t('chat.sandbox.tabDesktop') },
-])
+// Hide the desktop tab for CLI / Docker configs. Shared agents whose
+// sandbox row is not in this workspace still show the tab and let the
+// backend return DESKTOP_UNSUPPORTED.
+const desktopTabVisible = computed(() => {
+  const agentId = props.agentId?.trim()
+  if (!agentId) return false
+  const agent = chatResources.agents.find((item) => item.id === agentId)
+  if (!agent) {
+    return chatResources.agents.length > 0
+  }
+  const configId = agent.config?.sandbox_config_id?.trim()
+  if (!configId) return false
+  if (!sandboxConfigsReady.value) return false
+  const cfg = chatResources.sandboxConfigs.find((item) => item.id === configId)
+  if (!cfg) return true
+  return Boolean(cfg.config?.desktop_enabled)
+})
 
-// 终端实例惰性挂载（首次切到终端 tab 时），面板关闭即销毁（v-if），
+const tabs = computed(() => {
+  const list: Array<{ id: SandboxPanelTab; icon: string; label: string }> = [
+    { id: 'artifacts', icon: 'folder', label: t('chat.sandbox.tabArtifacts') },
+    { id: 'terminal', icon: 'terminal', label: t('chat.sandbox.tabTerminal') },
+  ]
+  if (desktopTabVisible.value) {
+    list.push({ id: 'desktop', icon: 'desktop', label: t('chat.sandbox.tabDesktop') })
+  }
+  return list
+})
+
+// 终端 / 桌面惰性挂载（首次切到对应 tab 时），面板关闭即销毁（v-if），
 // 与 ChatReferencesDrawer 的开合行为一致；会话切换时由 :key 重建。
 const terminalMounted = ref(false)
 const terminalRef = ref<{ focus?: () => void } | null>(null)
+const desktopMounted = ref(false)
+const desktopRef = ref<{ start?: () => void } | null>(null)
 
 watch(
   () => [panel?.visible.value, panel?.activeTab.value] as const,
   ([visible, tab]) => {
-    if (visible && tab === 'terminal') {
+    if (!visible) {
+      // Drop the lazy-mount flags so reopening on Files does not remount
+      // either panel (which would connect and refresh TTL).
+      terminalMounted.value = false
+      desktopMounted.value = false
+      return
+    }
+    if (tab === 'terminal') {
       terminalMounted.value = true
       void nextTick(() => terminalRef.value?.focus?.())
+      return
+    }
+    if (tab === 'desktop' && desktopTabVisible.value) {
+      // Same as the terminal tab: mount runs a lookup-only connect. A
+      // running sandbox attaches; paused or missing stays on the overlay
+      // until the user confirms. Opening the panel must never create or
+      // resume a microVM as a side effect.
+      desktopMounted.value = true
     }
   },
   { immediate: true },
 )
+
+watch(
+  () => [panel?.visible.value, props.agentId] as const,
+  ([visible]) => {
+    if (!visible) return
+    void chatResources.ensureSandboxConfigs().finally(() => {
+      sandboxConfigsReady.value = true
+    })
+  },
+  { immediate: true },
+)
+
+watch(desktopTabVisible, (show) => {
+  if (show) return
+  if (panel?.activeTab.value === 'desktop') {
+    panel.activeTab.value = 'artifacts'
+  }
+  desktopMounted.value = false
+})
 
 watch(
   () => props.sessionId,
@@ -225,7 +299,7 @@ function startResize(event: MouseEvent) {
     bottom: 0;
     width: 1px;
     background: transparent;
-    transition: background-color 0.15s ease;
+    transition: background-color var(--app-motion-fast) ease;
   }
 
   &:hover::after,
@@ -240,13 +314,13 @@ function startResize(event: MouseEvent) {
   color: var(--td-text-color-secondary);
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-md);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--app-motion-fast) ease, color var(--app-motion-fast) ease;
 
   &:hover {
     background: color-mix(in srgb, var(--td-text-color-primary) 8%, var(--td-bg-color-secondarycontainer));
@@ -277,13 +351,13 @@ function startResize(event: MouseEvent) {
   gap: 6px;
   padding: 6px 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--app-radius-sm);
   background: transparent;
   color: var(--td-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color var(--app-motion-fast) ease, color var(--app-motion-fast) ease;
 
   &:hover {
     color: var(--td-text-color-primary);
@@ -291,8 +365,14 @@ function startResize(event: MouseEvent) {
   }
 
   &.is-active {
-    color: var(--td-brand-color);
-    background: var(--td-brand-color-light);
+    color: var(--td-text-color-primary);
+    background: var(--td-bg-color-secondarycontainer);
+    font-weight: 500;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--td-text-color-secondary);
+    outline-offset: -2px;
   }
 }
 
@@ -300,12 +380,13 @@ function startResize(event: MouseEvent) {
   min-width: 16px;
   height: 16px;
   padding: 0 5px;
-  border-radius: 8px;
-  background: var(--td-brand-color);
-  color: #fff;
-  font-size: 11px;
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--td-text-color-primary) 8%, transparent);
+  color: var(--td-text-color-secondary);
+  font-size: var(--app-text-xs);
   line-height: 16px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .chat-sandbox-panel__body {
@@ -321,6 +402,7 @@ function startResize(event: MouseEvent) {
 }
 
 .chat-sandbox-panel__terminal,
+.chat-sandbox-panel__desktop,
 .chat-sandbox-panel__artifacts {
   flex: 1;
   min-height: 0;
@@ -335,7 +417,7 @@ function startResize(event: MouseEvent) {
   justify-content: center;
   gap: 10px;
   color: var(--td-text-color-placeholder);
-  font-size: 13px;
+  font-size: var(--app-text-md);
 
   p {
     margin: 0;

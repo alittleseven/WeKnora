@@ -14,7 +14,7 @@
 //	Get/List → GET  /containers/json?filters=label=…
 //	Delete   → DELETE /containers/{id}?force=1
 //	Exec     → POST /containers/{id}/exec → /exec/{id}/start (hijack)
-//	Snapshot → POST /commit (skill images under weknora-skill/)
+//	Snapshot → POST /commit (skill images under weknora-skill/, fork images under weknora-fork/)
 //
 // Every file operation uses exec with an explicit account (root by default),
 // timeout and activity tracking. Archive endpoints bypass those exec settings.
@@ -419,6 +419,14 @@ func (c *DockerRemoteClient) Connect(
 	}, nil
 }
 
+// ConnectSession already gets the lifecycle state from Connect's container
+// inspection, including terminal detection and resuming a stopped container.
+func (c *DockerRemoteClient) ConnectSession(
+	ctx context.Context, req RemoteConnectRequest,
+) (RemoteSandboxHandle, error) {
+	return c.Connect(ctx, req)
+}
+
 // dockerStartReadyTimeout bounds how long Create/Connect/Exec wait for PID 1
 // after the daemon has accepted a start. The window is milliseconds on a
 // healthy daemon; this is only the ceiling for a wedged one.
@@ -692,7 +700,7 @@ func (c *DockerRemoteClient) Exec(
 	}
 
 	start := time.Now()
-	stdout, stderr, err := c.streamExec(execCtx, created.ID, req.Stdin)
+	stdout, stderr, err := c.streamExec(execCtx, created.ID, req.Stdin, req.OnOutput)
 	if err != nil {
 		return nil, err
 	}
@@ -724,6 +732,7 @@ func (c *DockerRemoteClient) streamExec(
 	ctx context.Context,
 	execID string,
 	stdin string,
+	output ...func(string, []byte),
 ) (string, string, error) {
 	attached, err := c.api.ExecAttach(ctx, execID, client.ExecAttachOptions{})
 	if err != nil {
@@ -753,7 +762,12 @@ func (c *DockerRemoteClient) streamExec(
 	var stdout, stderr bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		_, copyErr := stdcopy.StdCopy(&stdout, &stderr, attached.Reader)
+		var out, errOut io.Writer = &stdout, &stderr
+		if len(output) > 0 && output[0] != nil {
+			out = io.MultiWriter(&stdout, remoteOutputWriter{stream: "stdout", callback: output[0]})
+			errOut = io.MultiWriter(&stderr, remoteOutputWriter{stream: "stderr", callback: output[0]})
+		}
+		_, copyErr := stdcopy.StdCopy(out, errOut, attached.Reader)
 		done <- copyErr
 	}()
 
@@ -1177,8 +1191,12 @@ func (c *DockerRemoteClient) ensureImage(ctx context.Context, image string) erro
 	// Skill snapshots are daemon-local commits, not registry tags. Pulling
 	// one would hit Docker Hub for a name we minted and never pushed, and a
 	// miss here means "this daemon does not have the image", not "fetch it".
-	if dockerIsSkillSnapshotRef(image) {
-		return dockerInvalidRequest("Create", "skill snapshot image "+image+" is not on this daemon")
+	if dockerIsLocalSnapshotRef(image) {
+		kind := "skill"
+		if dockerIsForkSnapshotRef(image) {
+			kind = "fork"
+		}
+		return dockerInvalidRequest("Create", kind+" snapshot image "+image+" is not on this daemon")
 	}
 	pullCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dockerImagePullBudget)
 	defer cancel()
@@ -1288,3 +1306,11 @@ var (
 	_ RemoteSandboxClient   = (*DockerRemoteClient)(nil)
 	_ RemoteSnapshotManager = (*DockerRemoteClient)(nil)
 )
+
+// remoteOutputWriter observes bytes without changing buffered exec results.
+type remoteOutputWriter struct {
+	stream   string
+	callback func(string, []byte)
+}
+
+func (w remoteOutputWriter) Write(p []byte) (int, error) { w.callback(w.stream, p); return len(p), nil }

@@ -91,11 +91,11 @@ func RunnableWorkspaceScript(scriptPath string) (string, bool) {
 // it comes from: the host environment the app reads at startup, or a tenant's
 // sandbox config. Without it the two disagreed — execution validated the path
 // and fell back to SessionOutputRoot, while the tools and the artifact
-// collector took the host value as-is, so an override pointing outside
-// /workspace moved the readers somewhere the writers never wrote.
+// collector took the host value as-is. Keep this separate from shell working
+// directories: access to a sandbox path does not make it a delivery directory.
 func ValidatedSessionOutputDir(dir string) (string, bool) {
-	clean, err := cleanSessionWorkDir(dir, false)
-	if err != nil {
+	clean := path.Clean(strings.TrimSpace(dir))
+	if clean != SessionWorkspaceRoot && !strings.HasPrefix(clean, SessionWorkspaceRoot+"/") {
 		return "", false
 	}
 	return clean, true
@@ -206,4 +206,10 @@ func SkillInterpreterCommand(skillDir, scriptPath string) (string, []string) {
 	default:
 		return "/bin/sh", []string{scriptPath}
 	}
+}
+
+// SkillCommandPath is shared by normal skill execution and installation verification.
+func SkillCommandPath(dir string) string {
+	return path.Join(dir, ".venv", "bin") + ":" +
+		path.Join(dir, "node_modules", ".bin") + ":" + path.Join(dir, ".weknora", "bin")
 }

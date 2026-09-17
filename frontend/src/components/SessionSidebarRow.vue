@@ -14,6 +14,9 @@
     </form>
     <span v-else class="submenu_title" :class="batchMode ? 'submenu_title--batch' : ''" :title="item.title">
       <t-icon v-if="item.is_pinned" name="pin" class="submenu_pin_icon" />
+      <t-tooltip v-if="item.parent_session_id" content="由其他会话分叉而来">
+        <t-icon name="git-branch" class="submenu_fork_icon" />
+      </t-tooltip>
       <span class="submenu_title-text">{{ item.title }}</span>
       <span v-if="apiOwnerTag" class="session-owner-tag" :class="`session-owner-tag--${apiOwnerTag.kind}`"
         :title="apiOwnerTag.full">{{ apiOwnerTag.label }}</span>
@@ -77,7 +80,7 @@ interface SessionMenuOption {
 type MenuMode = 'menu' | 'clear' | 'delete'
 
 const props = defineProps<{
-  item: { id: string; path: string; title: string; is_pinned?: boolean; user_id?: string }
+  item: { id: string; path: string; title: string; is_pinned?: boolean; user_id?: string; parent_session_id?: string }
   batchMode: boolean
   activePath: string
   selectedIds: string[]
@@ -224,13 +227,7 @@ const confirmDangerAction = (): void => {
   border: 1.5px solid var(--td-component-stroke);
   border-top-color: currentColor;
   border-radius: 50%;
-  animation: session-running-spin 0.8s linear infinite;
-}
-
-@keyframes session-running-spin {
-  to {
-    transform: rotate(360deg);
-  }
+  animation: wk-spin 0.8s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -257,7 +254,7 @@ const confirmDangerAction = (): void => {
   border-radius: 5px;
   color: var(--td-text-color-primary);
   background: var(--td-bg-color-container);
-  font-size: 14px;
+  font-size: var(--app-text-base);
   line-height: 24px;
   outline: none;
   box-shadow: 0 0 0 2px var(--td-brand-color-light);
@@ -275,7 +272,7 @@ const confirmDangerAction = (): void => {
   color: inherit;
   background: transparent;
   cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color var(--app-motion-fast) ease, color var(--app-motion-fast) ease;
 
   &:hover {
     background: var(--td-bg-color-container-hover);
@@ -294,10 +291,10 @@ const confirmDangerAction = (): void => {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 11px;
+  font-size: var(--app-text-xs);
   line-height: 15px;
   font-weight: 400;
-  border-radius: 4px;
+  border-radius: var(--app-radius-xs);
 
   &--user {
     color: var(--td-brand-color);
@@ -322,7 +319,7 @@ const confirmDangerAction = (): void => {
     margin-top: 2px !important;
     min-width: 160px !important;
     width: max-content !important;
-    border-radius: 8px !important;
+    border-radius: var(--app-radius-md) !important;
     background: var(--td-bg-color-container) !important;
     border: 0.5px solid var(--td-component-stroke) !important;
     box-shadow:
@@ -356,7 +353,7 @@ const confirmDangerAction = (): void => {
   border-radius: 5px;
   color: var(--td-text-color-primary);
   background: transparent;
-  font-size: 14px;
+  font-size: var(--app-text-base);
   line-height: 20px;
   text-align: left;
   white-space: nowrap;
@@ -386,7 +383,7 @@ const confirmDangerAction = (): void => {
   color: var(--td-text-color-secondary);
 
   .t-icon {
-    font-size: 16px;
+    font-size: var(--app-text-xl);
   }
 }
 
@@ -406,14 +403,14 @@ const confirmDangerAction = (): void => {
 .session-action-confirm__title {
   margin: 0;
   color: var(--td-text-color-primary);
-  font-size: 14px;
+  font-size: var(--app-text-base);
   font-weight: 600;
   line-height: 20px;
 }
 
 .session-action-confirm__body {
   color: var(--td-text-color-secondary);
-  font-size: 14px;
+  font-size: var(--app-text-base);
   line-height: 1.5;
   word-break: break-word;
 }
@@ -430,13 +427,13 @@ const confirmDangerAction = (): void => {
   height: 30px;
   padding: 0 12px;
   border: 0.5px solid var(--td-component-stroke);
-  border-radius: 6px;
+  border-radius: var(--app-radius-sm);
   color: var(--td-text-color-primary);
   background: var(--td-bg-color-container);
-  font-size: 14px;
+  font-size: var(--app-text-base);
   line-height: 28px;
   cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--app-motion-fast) ease, color var(--app-motion-fast) ease, border-color var(--app-motion-fast) ease;
 
   &:hover:not(:disabled) {
     background: var(--td-bg-color-container-hover);

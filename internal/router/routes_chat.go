@@ -64,7 +64,20 @@ func RegisterSessionRoutes(
 		sessions.GET("/:id/attachments/:attachment_id/preview", handler.PreviewTemporaryDocument)
 		sessions.DELETE("/:id/attachments/:attachment_id", handler.DeleteTemporaryDocument)
 		sessions.POST("/:session_id/stop", handler.StopSession)
+		sessions.POST("/:session_id/fork", handler.ForkSession)
 		sessions.POST("/:session_id/sandbox/terminal-ticket", handler.IssueSandboxTerminalTicket)
+		sessions.POST("/:session_id/sandbox/desktop-ticket", handler.IssueSandboxDesktopTicket)
+		sessions.POST("/:session_id/sandbox/desktop/activity", handler.ReportSandboxDesktopActivity)
+		sessions.GET("/:id/local-browser", handler.BrowserSkillConnection)
+		sessions.POST("/:session_id/local-browser", handler.BrowserSkillConnection)
+		// Mid-run message injection: append a user message to the turn that is
+		// currently generating. Accepts even when no run is live (the client
+		// then falls back to a normal send), mirroring StopSession's ownership
+		// rules.
+		sessions.POST("/:session_id/steer", handler.SteerMessage)
+		sessions.GET("/:id/steer", handler.ListSteerMessages)
+		sessions.DELETE("/:id/steer/:steer_id", handler.DeleteSteerMessage)
+		sessions.POST("/:session_id/steer/:steer_id/inject", handler.PromoteSteerMessage)
 		// POST and DELETE share this path but gin maintains a separate radix tree
 		// per HTTP verb, and the existing trees use different wildcard names
 		// (POST uses :session_id, DELETE uses :id). Use whatever matches each
@@ -137,4 +150,17 @@ func RegisterChatRoutes(r *gin.RouterGroup, handler *session.Handler, g *rbacGua
 // /sessions/:id (gin requires identical wildcard names per tree).
 func RegisterSandboxTerminalRoutes(r *gin.Engine, sessionHandler *session.Handler) {
 	r.GET("/api/v1/sessions/:id/sandbox/terminal", sessionHandler.SandboxTerminalWS)
+}
+
+// RegisterSandboxDesktopRoutes registers the desktop relay WebSocket.
+//
+// Registered BEFORE the global auth middleware for the same reason as the
+// terminal: a browser WebSocket handshake cannot carry Authorization, so a
+// one-shot session-bound ticket travels in the query string. Unlike the
+// terminal's JWT the desktop ticket is an opaque random string consumed with
+// GETDEL, so a leaked URL is worth one handshake at most.
+//
+// The wildcard is :id to match /sessions/:id in the same radix tree.
+func RegisterSandboxDesktopRoutes(r *gin.Engine, sessionHandler *session.Handler) {
+	r.GET("/api/v1/sessions/:id/sandbox/desktop", sessionHandler.SandboxDesktopWS)
 }

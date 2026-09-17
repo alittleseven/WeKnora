@@ -273,8 +273,9 @@ func TestCacheBudgetGuardKeepsSmallWipesBig(t *testing.T) {
 func TestCleanImageScratchCommandShape(t *testing.T) {
 	cmd := cleanImageScratchCommand()
 
-	require.Contains(t, cmd, "rm -rf /workspace/* /tmp/* /workspace/.[!.]* || true",
-		"the scratch wipe covers /tmp too: installers leave archives and locks there")
+	require.Contains(t, cmd, "rm -rf /workspace/* /tmp/* /workspace/.[!.]* /run/desktop || true",
+		"the scratch wipe covers /tmp and /run/desktop: a leftover websockify "+
+			"secret would be reused by every sandbox booted from the snapshot")
 	require.Contains(t, cmd, "mkdir -p")
 	require.Contains(t, cmd, "status=$?")
 	require.Contains(t, cmd, "exit $status")
@@ -797,6 +798,25 @@ func TestInstallSkillSkipsWhenReadyWithTheSameArchive(t *testing.T) {
 		"a skip must still attach the install to the workspace catalog")
 }
 
+// waitBackgroundInstallReady waits until the InstallSkill goroutine has
+// finished the fixture run. InstallSkill only queues the work, so reading
+// Status immediately after it returns races: the mock often lands on ready
+// before the test process runs the next line. A skip never writes a new
+// snapshot, so this is also the proof that a retry actually ran.
+func waitBackgroundInstallReady(t *testing.T, fx *installFixture, msgAndArgs ...any) *types.TenantSkillEntity {
+	t.Helper()
+	var skill *types.TenantSkillEntity
+	require.Eventually(t, func() bool {
+		got, err := fx.skillRepo.GetSkill(context.Background(), 7, "cfg-1", "sk-1")
+		if err != nil || got == nil {
+			return false
+		}
+		skill = got
+		return got.Status == types.SkillStatusReady && got.InstalledSnapshotID != ""
+	}, 2*time.Second, 5*time.Millisecond, msgAndArgs...)
+	return skill
+}
+
 func TestInstallSkillRetriesAFailedSkillWithTheSameArchive(t *testing.T) {
 	fx := newInstallFixture(t)
 	archive := zipBundle(t, map[string]string{
@@ -815,10 +835,9 @@ func TestInstallSkillRetriesAFailedSkillWithTheSameArchive(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "sk-1", id)
-	skill, getErr := fx.skillRepo.GetSkill(context.Background(), 7, "cfg-1", "sk-1")
-	require.NoError(t, getErr)
-	require.Equal(t, types.SkillStatusInstalling, skill.Status,
+	skill := waitBackgroundInstallReady(t, fx,
 		"a failed skill is a retry even when the archive digest is unchanged")
+	require.Empty(t, skill.Error)
 }
 
 // Most failed installs fail for a reason the archive cannot fix, so the retry
@@ -911,9 +930,7 @@ func TestInstallSkillReinstallsWhenTheLiveImageNoLongerCarriesTheSkill(t *testin
 
 	require.NoError(t, err)
 	require.Equal(t, "sk-1", id)
-	skill, getErr := fx.skillRepo.GetSkill(context.Background(), 7, "cfg-1", "sk-1")
-	require.NoError(t, getErr)
-	require.Equal(t, types.SkillStatusInstalling, skill.Status,
+	waitBackgroundInstallReady(t, fx,
 		"a ready row whose files left the image is a repair, not a skip")
 }
 
@@ -989,13 +1006,10 @@ func TestInstallSkillRetriesAStaleInFlightInstallOfTheSameArchive(t *testing.T) 
 
 	require.NoError(t, err)
 	require.Equal(t, "sk-1", id)
-	skill, getErr := fx.skillRepo.GetSkill(context.Background(), 7, "cfg-1", "sk-1")
-	require.NoError(t, getErr)
-	require.Equal(t, types.SkillStatusInstalling, skill.Status)
-	require.NotNil(t, skill.InstallingSince)
-	require.Equal(t, fx.now(), *skill.InstallingSince,
+	skill := waitBackgroundInstallReady(t, fx,
 		"a dead in-flight row must be allowed to start a new run, not wait for the reaper")
 	require.Empty(t, skill.Error)
+	require.Nil(t, skill.InstallingSince)
 }
 
 // The ledger records which skill an install snapshotted, not which archive, so
@@ -1136,9 +1150,7 @@ func TestInstallSkillDoesNotSkipARemovalOfTheSameArchive(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "sk-1", id)
-	skill, getErr := fx.skillRepo.GetSkill(context.Background(), 7, "cfg-1", "sk-1")
-	require.NoError(t, getErr)
-	require.Equal(t, types.SkillStatusInstalling, skill.Status,
+	waitBackgroundInstallReady(t, fx,
 		"re-uploading during a removal is how the upload cancels it")
 }
 
@@ -1966,6 +1978,7 @@ type installFixture struct {
 	// beforeExecute runs at the moment the engine would start, so a test can
 	// observe the state an attaching console would see mid-install.
 	beforeExecute func()
+	afterExecute  func()
 	// beforeSeed runs on the first image file write, so a test can prove the
 	// transcript locators landed before the minutes-long copy begins.
 	beforeSeed func()
@@ -3101,8 +3114,11 @@ func (s *installCustomAgentService) ListAgents(context.Context) ([]*types.Custom
 }
 
 func (s *installCustomAgentService) UpdateAgent(
-	_ context.Context, agent *types.CustomAgent,
+	_ context.Context, agent *types.CustomAgent, avatar *string,
 ) (*types.CustomAgent, error) {
+	if avatar != nil {
+		agent.Avatar = *avatar
+	}
 	return agent, nil
 }
 
@@ -3143,7 +3159,8 @@ func (s *installAgentService) CreateAgentEngine(
 func (s *installAgentService) ValidateConfig(*types.AgentConfig) error { return nil }
 
 type installAgentEngine struct {
-	fx *installFixture
+	sink types.SteerSink
+	fx   *installFixture
 }
 
 func (e *installAgentEngine) Execute(
@@ -3159,15 +3176,38 @@ func (e *installAgentEngine) Execute(
 	}
 	e.fx.agentPrompts = append(e.fx.agentPrompts, prompt)
 	e.fx.record("agent-execute")
+	if e.sink != nil {
+		events, _, err := e.sink.PollSteer(context.Background(), "sess-1", e.fx.currentInstallMessageID(), 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, evt := range events {
+			e.sink.PersistSteerMessage(
+				context.Background(), "sess-1", e.fx.currentInstallMessageID(),
+				evt["id"].(string), evt["content"].(string), nil, "web",
+			)
+		}
+	}
+	if e.fx.afterExecute != nil {
+		e.fx.afterExecute()
+	}
 	if e.fx.agentDelay > 0 {
 		time.Sleep(e.fx.agentDelay)
 	}
 	if e.fx.agentErr != nil {
 		return nil, e.fx.agentErr
 	}
+	if e.fx.sandboxMgr.files == nil {
+		e.fx.sandboxMgr.files = map[string][]byte{}
+	}
+	reportPath := path.Join(e.fx.engineConfig.SkillInstallDir(), ".weknora", "install-report.json")
+	if _, exists := e.fx.sandboxMgr.files[reportPath]; !exists {
+		e.fx.sandboxMgr.files[reportPath] = []byte(`{"commands":[],"blockers":[]}`)
+	}
 	return &types.AgentState{IsComplete: true}, nil
 }
-func (e *installAgentEngine) SetMemoryPrompt(string) {}
+func (e *installAgentEngine) SetMemoryPrompt(string)            {}
+func (e *installAgentEngine) SetSteerSink(sink types.SteerSink) { e.sink = sink }
 
 type installSessionService struct {
 	fx *installFixture
@@ -3412,4 +3452,12 @@ func TestSeededSkillHelperIsDirectlyExecutable(t *testing.T) {
 	info, err := os.Stat(helper)
 	require.NoError(t, err)
 	require.NotZero(t, info.Mode().Perm()&0o200, "the executable skill remains writable")
+}
+
+func (f *installFixture) currentInstallMessageID() string {
+	row, _ := f.skillRepo.GetSkill(context.Background(), 7, "cfg-1", "sk-1")
+	if row == nil {
+		return ""
+	}
+	return row.InstallMessageID
 }

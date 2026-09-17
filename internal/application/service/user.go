@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -79,7 +80,8 @@ const (
 // getJwtSecret retrieves the JWT secret from the environment, falling back to a securely generated random secret.
 func getJwtSecret() string {
 	jwtSecretOnce.Do(func() {
-		if envSecret := strings.TrimSpace(os.Getenv("JWT_SECRET")); envSecret != "" {
+		envSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
+		if envSecret != "" && envSecret != "weknora-jwt-secret" && envSecret != "CHANGE-ME-jwt-secret" {
 			jwtSecret = envSecret
 			return
 		}
@@ -626,6 +628,19 @@ func (s *userService) UpdateUserPreferences(
 	}
 
 	merged := user.Preferences
+	if patch.BrowserSearchInstructions != nil {
+		value := strings.TrimSpace(*patch.BrowserSearchInstructions)
+		if utf8.RuneCountInString(value) > types.MaxBrowserSearchInstructionsLength {
+			return types.UserPreferences{}, fmt.Errorf(
+				"browser search instructions must not exceed %d characters",
+				types.MaxBrowserSearchInstructionsLength,
+			)
+		}
+		merged.BrowserSearchInstructions = nil
+		if value != "" && value != types.DefaultBrowserSearchInstructions {
+			merged.BrowserSearchInstructions = &value
+		}
+	}
 	if patch.LastActiveTenantID != nil {
 		// *0 = "forget my preference, fall back to home on next login";
 		// any positive value = set/replace. We do not validate membership

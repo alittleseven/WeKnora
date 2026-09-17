@@ -1,9 +1,10 @@
 package agent
 
 import (
+	"testing"
+
 	"github.com/Tencent/WeKnora/internal/agent/skills"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestToolGuidanceUsesActualCapabilities(t *testing.T) {
@@ -16,10 +17,22 @@ func TestToolGuidanceUsesActualCapabilities(t *testing.T) {
 	require.Contains(t, shell, "shell_exec(skill_name=")
 	require.Contains(t, shell, "/workspace/output")
 	require.Contains(t, shell, "sandbox:<file name>")
+	require.Contains(t, shell, "Copy the exact links supplied in the tool result's appended Output files list")
+	require.Contains(t, shell, "including /tmp/task/previews, are internal working files")
+	require.Contains(t, shell, "Rendering pages for your own layout checks does not publish them")
 	require.Contains(t, shell, "translate execute_skill_script")
 	require.NotContains(t, formatToolGuidance([]string{"knowledge_search"}), "/workspace")
 	require.NotContains(t, formatToolGuidance([]string{"read_file"}), "shell_exec")
 	require.NotContains(t, formatToolGuidance([]string{"read_file"}), "execute_skill_script")
 	require.Empty(t, formatToolGuidance(nil))
 	require.NotContains(t, formatToolGuidance([]string{"execute_skill_script"}), "execute_skill_script is available")
+	require.NotContains(t, shell, "Browser source:")
+	require.Contains(t, formatToolGuidance([]string{"local_browser"}), "requires no shell command")
+}
+
+func TestArtifactGuidanceUsesConfiguredOutputDirectory(t *testing.T) {
+	t.Setenv("WEKNORA_SKILL_OUTPUT_DIR", "/workspace/deliverables")
+	guidance := formatToolGuidance([]string{"shell_exec", "read_file"})
+	require.Contains(t, guidance, "/workspace/deliverables is the only directory collected for download")
+	require.NotContains(t, guidance, "/workspace/output is the only directory collected")
 }
