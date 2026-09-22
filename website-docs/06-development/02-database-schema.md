@@ -12,7 +12,7 @@ WeKnora 使用版本化迁移维护数据库结构，PostgreSQL 与 SQLite 分�
 | `sqlite` | Lite 模式。路径取 `DB_PATH`（默认 `./data/weknora.db`），DSN 附加 `_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on`，并加载 `sqlite-vec` 扩展（`sqlite_vec.Auto()`）做向量检索 |
 | 其他值 | 直接报错 `unsupported database driver` |
 
-**MySQL 不是主库选项**：`go.mod` 里的 `go-sql-driver/mysql` 是给 Doris 检索引擎（MySQL 协议、`database/sql`）注册协议驱动用的（见 `container.go` import 注释）。`migrations/mysql/00-init-db.sql` 是一份仅含 7 张核心表（tenants/models/knowledge_bases/knowledges/sessions/messages/chunks）的一次性 MySQL 建表脚本，**没有任何 Go 代码或脚本引用它**，未接入应用启动流程，可视为遗留/外部初始化用途。
+**MySQL 不是主库选项**：`go.mod` 里的 `go-sql-driver/mysql` 是给 Doris 检索引擎（MySQL 协议、`database/sql`）注册协议驱动用的（见 `container.go` import 注释）。`migrations/mysql/00-init-db.sql` 是一份仅含 10 张核心表（tenants/models/knowledge_bases/knowledges/sessions/messages/message_suggestion_sets/message_suggestion_events/chunks/chunk_revisions）的一次性 MySQL 建表脚本，**没有任何 Go 代码或脚本引用它**，未接入应用启动流程，可视为遗留/外部初始化用途。
 
 检索引擎（向量/关键词索引的存储）与主库解耦，由 `RETRIEVE_DRIVER` 控制（postgres / elasticsearch / qdrant / milvus / sqlite 等，详见《扩展点指南》）。当 `RETRIEVE_DRIVER` 不含 `postgres` 时，迁移 DSN 会带上 `options=-c app.skip_embedding=true`，`embeddings` 表相关迁移通过该 GUC 条件跳过。
 
@@ -55,7 +55,7 @@ migrations/
 | 版本 | 变更 |
 | --- | --- |
 | 000080 | knowledge_bases.auto_tag_config |
-| 000081 | messages.artifacts，持久化生成文件 |
+| 000081 | messages.artifacts，持久化生成文件（000103 起改存 `message_artifacts` 表） |
 | 000082 | tenant_sandbox_configs，多命名后端与配置变更租期 |
 | 000083 | sessions.sandbox_config_id |
 | 000084 | 个人记忆六张表、tenants.memory_config、messages.used_memories |
@@ -67,6 +67,7 @@ migrations/
 | 000090 | tenant_skill_catalog；tenant_skills.catalog_id，回填已有安装 |
 | 000091 | mcp_tool_approvals.enabled，默认 true |
 | 000101 | knowledges.profile（文档画像），knowledge_bases.profile_config / generated_profile（AI 知识库描述） |
+| 000103 | `message_artifacts` 表，从 `messages.artifacts` 回填；此后只读写新表。回填后旧列中有内容的行置为 NULL（列保留，兼容滚动升级中的旧实例）；无法解析的 `file_size`/`created_at` 回退为 0 和消息创建时间，不中断迁移。down 迁移会把新表写回旧列 |
 
 SQLite 版本号独立演进，不能与 PostgreSQL 数字一一对应：
 
@@ -79,6 +80,7 @@ SQLite 版本号独立演进，不能与 PostgreSQL 数字一一对应：
 | 000009 | 历史 Embed memory 标志列；当前渠道接口不暴露此字段 |
 | 000010–000011 | 多标签关联、principal 模型 |
 | 000012–000013 | 消息 usage、MCP 工具 enabled |
+| 000023 | `message_artifacts` 表，回填并清空旧列（对应 PostgreSQL 000103） |
 
 基线 schema 与后续增量共同决定新建库和已有库的最终结果；不能只看新增迁移文件名判断 Lite 是否有某张表。
 
@@ -120,7 +122,8 @@ SQLite 版本号独立演进，不能与 PostgreSQL 数字一一对应：
 | 表 | 用途 | 关键字段 |
 | --- | --- | --- |
 | `sessions` | 会话（对话上下文与检索参数快照） | `id`、`tenant_id`、`title`、`knowledge_base_id`、`agent_id`（FK→custom_agents）、`user_id`、`max_rounds`、`enable_rewrite`、`fallback_strategy`/`fallback_response`、`keyword_threshold`/`vector_threshold`、`embedding_top_k`/`rerank_top_k`/`rerank_threshold`、`rerank_model_id`/`summary_model_id`、`agent_config`/`context_config`（JSONB）、`sandbox_config_id` |
-| `messages` | 消息 | `id`、`request_id`、`session_id`（FK）、`role`、`content`/`rendered_content`、`knowledge_references`（JSONB 引用）、`agent_steps`（JSONB，Agent 推理轨迹）、`mentioned_items`/`images`（JSONB）、`is_completed`/`is_fallback`、`channel`（web/IM 渠道）、`agent_id`+`agent_tenant_id`、`model_id`、`knowledge_id`、`agent_duration_ms`、`execution_context`、`artifacts`/`used_memories`/`usage`（JSONB） |
+| `messages` | 消息 | `id`、`request_id`、`session_id`（FK）、`role`、`content`/`rendered_content`、`knowledge_references`（JSONB 引用）、`agent_steps`（JSONB，Agent 推理轨迹）、`mentioned_items`/`images`（JSONB）、`is_completed`/`is_fallback`、`channel`（web/IM 渠道）、`agent_id`+`agent_tenant_id`、`model_id`、`knowledge_id`、`agent_duration_ms`、`execution_context`、`used_memories`/`usage`（JSONB）。`artifacts` 列自 000103 起不再读写且已清空（仅为回滚与滚动升级保留），生成文件见 `message_artifacts` |
+| `message_artifacts` | 技能生成的文件，一行一个（000103） | `session_id`、`message_id`、`position`（消息内序号，即下载接口的 index；与 `message_id` 唯一）、`url`（存储或 resource:// 引用，不返回客户端）、`file_name`/`file_type`/`file_size`、`content_hash`、`source_path`（同会话同路径视为同一文件的多个版本）、`mod_time`（RFC 3339 文本，保留纳秒精度供采集器比对）、`created_at`。无软删除，随消息软删除一并隐藏 |
 | `message_suggestion_sets` | 建议问题集（000067） | `tenant_id`、`session_id`、`assistant_message_id`、`placement`（starter/follow_up）、`config_hash`+`locale`（缓存键，唯一）、`status`、`questions`（JSONB）、token/延迟统计、`lease_until` |
 | `message_suggestion_events` | 建议问题曝光/点击事件 | `suggestion_set_id`（FK，CASCADE）、`question_id`、`event_type`、`actor_id` |
 | `temporary_documents` | 会话内临时文档（000070） | `tenant_id`、`session_id`、`resource_ref`、`file_name`/`file_type`/`file_size`、`status`（uploaded/processing/ready/expired）、`content`、`chunks`（JSONB）、`expires_at` |
@@ -325,7 +328,7 @@ make migrate-goto version=60       # 迁移/回滚到指定版本
 
 ## 如何新增一个迁移 {#_6-如何新增一个迁移}
 
-1. **创建文件**：`make migrate-create name=add_my_feature`，在 `migrations/versioned/` 下生成下一个版本号（当前最大为 `000091`；创建前再次检查目录，使用下一个空闲版本的 up/down 文件）；
+1. **创建文件**：`make migrate-create name=add_my_feature`，在 `migrations/versioned/` 下生成下一个版本号（创建前检查目录，使用下一个空闲版本的 up/down 文件）；
 2. **编写 up SQL**：注意 PostgreSQL 方言（JSONB、部分索引、`TIMESTAMP WITH TIME ZONE`）；若涉及 `embeddings` 表，参考既有迁移用 `app.skip_embedding` GUC 做条件门控（`SELECT current_setting('app.skip_embedding', true)`），保证非 postgres 检索引擎部署也能通过迁移；
 3. **编写 down SQL**：必须可逆（drop column/table/index），否则回滚链会断；
 4. **同步 SQLite**：`migrations/sqlite/000000_init.up.sql` 是压平的全量 schema，**新增列/表必须合并进去**（注意方言转换：JSONB→TEXT、SERIAL→INTEGER AUTOINCREMENT、无部分索引语法差异等）。若变更需要在已有 Lite 库上生效（例如删表、删数据），还要在 `migrations/sqlite/` 追加一个增量版本；
@@ -333,6 +336,8 @@ make migrate-goto version=60       # 迁移/回滚到指定版本
 6. **验证**：`make migrate-up` → `make migrate-down` → `make migrate-up` 三连确认可逆；SQLite 侧用 `DB_DRIVER=sqlite` 启动一次 Lite 版验证初始化脚本。
 
 ## 常见迁移问题排查 {#_7-常见迁移问题排查}
+
+面向部署的诊断顺序、扩展检查与恢复边界见[数据库迁移排障](../01-getting-started/05-troubleshooting.md#database-migrations)。`force` 只修改版本标记，不撤销 SQL；先备份并核对实际 schema，不能假定失败迁移已完整回滚。
 
 ### dirty state（最常见） {#_7-1-dirty-state-最常见}
 
@@ -344,9 +349,10 @@ make migrate-version            # 输出形如 "74 (dirty)"
 # 或直接查表
 # SELECT version, dirty FROM schema_migrations;
 
-# 2. 人工检查该版本的 up SQL 实际执行到哪，把残留补齐或清理
+# 2. 停止写入、备份，核对实际 schema 和失败 SQL 的执行位置
 
-# 3. 强制回到上一个干净版本后重试
+# 3. 仅在确认 schema 符合版本 73 且失败迁移可安全重跑后执行
+# 73 仅为示例，不能机械地用失败版本减一
 make migrate-force version=73
 make migrate-up
 ```
